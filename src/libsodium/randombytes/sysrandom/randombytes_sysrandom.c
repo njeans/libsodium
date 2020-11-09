@@ -1,7 +1,9 @@
 
 #include <assert.h>
 #include <errno.h>
-#include <fcntl.h>
+#ifndef SGX
+# include <fcntl.h>
+#endif
 #include <limits.h>
 #include <stdint.h>
 #include <string.h>
@@ -10,14 +12,7 @@
 #endif
 #include <stdlib.h>
 
-#include <sys/types.h>
-#ifndef _WIN32
-# include <sys/stat.h>
-# include <sys/time.h>
-#endif
-#ifdef __linux__
-# define _LINUX_SOURCE
-#endif
+//From Nerla: I kept all of the conditionals that were moved in the sgx pr in the SGX condition (line 39) with any updates to them. I kept all other conditionals outside of it
 #ifdef HAVE_SYS_RANDOM_H
 # include <sys/random.h>
 #endif
@@ -40,9 +35,23 @@
 #if !defined(NO_BLOCKING_RANDOM_POLL) && defined(__linux__)
 # define BLOCK_ON_DEV_RANDOM
 #endif
-#ifdef BLOCK_ON_DEV_RANDOM
-# include <poll.h>
-#endif
+
+#ifdef SGX
+# include "sgx_trts.h"
+#else
+# include <sys/types.h>
+# ifndef _WIN32
+#  include <sys/stat.h>
+#  include <sys/time.h>
+# endif
+# ifdef __linux__
+#   define _LINUX_SOURCE
+# endif
+# ifdef BLOCK_ON_DEV_RANDOM
+#   include <poll.h>
+# endif
+#endif /* SGX */
+
 
 #include "core.h"
 #include "private/common.h"
@@ -122,7 +131,8 @@ static SysRandom stream = {
     SODIUM_C99(.getrandom_available =) 0
 };
 
-# ifndef _WIN32
+//From Nerla: kept the sgx pr conditional
+#if !defined(_WIN32) && !defined(SGX)
 static ssize_t
 safe_read(const int fd, void * const buf_, size_t size)
 {
@@ -147,7 +157,9 @@ safe_read(const int fd, void * const buf_, size_t size)
     return (ssize_t) (buf - (unsigned char *) buf_);
 }
 
-#  ifdef BLOCK_ON_DEV_RANDOM
+//From Nerla: kept the added SGX conditional and kept updated conditional for libsodium
+# ifdef BLOCK_ON_DEV_RANDOM
+#  if !defined(SGX)
 static int
 randombytes_block_on_dev_random(void)
 {
@@ -173,6 +185,7 @@ randombytes_block_on_dev_random(void)
     return close(fd);
 }
 #  endif /* BLOCK_ON_DEV_RANDOM */
+# endif /* SGX */
 
 static int
 randombytes_sysrandom_random_dev_open(void)
@@ -313,7 +326,7 @@ randombytes_sysrandom_close(void)
 {
     int ret = -1;
 
-# ifndef _WIN32
+#if !defined(_WIN32) && !defined(SGX)
     if (stream.random_data_source_fd != -1 &&
         close(stream.random_data_source_fd) == 0) {
         stream.random_data_source_fd = -1;
@@ -344,7 +357,9 @@ randombytes_sysrandom_buf(void * const buf, const size_t size)
     assert(size <= ULLONG_MAX);
 #  endif
 # endif
-# ifndef _WIN32
+
+//From Nerla: tried to combine the conditionals here
+#if !defined(_WIN32) && !defined(SGX)
 #  ifdef HAVE_LINUX_COMPATIBLE_GETRANDOM
     if (stream.getrandom_available != 0) {
         if (randombytes_linux_getrandom(buf, size) != 0) {
@@ -357,7 +372,19 @@ randombytes_sysrandom_buf(void * const buf, const size_t size)
         safe_read(stream.random_data_source_fd, buf, size) != (ssize_t) size) {
         sodium_misuse(); /* LCOV_EXCL_LINE */
     }
-# else /* _WIN32 */
+
+#elif defined(SGX)
+    /* Use SGX API's to generate the random bytes
+     * WARNING: SGX documentation states that, in simulation mode,
+     * the sgx_read_rand function generates a pseudo-random sequence.
+     */
+
+    #warning Insecure in SGX simulation mode
+
+    if (sgx_read_rand(buf, size) != SGX_SUCCESS) {
+        sodium_misuse(); /* LCOV_EXCL_LINE */
+    }
+#else /* _WIN32 */
     COMPILER_ASSERT(randombytes_BYTES_MAX <= 0xffffffffUL);
     if (size > (size_t) 0xffffffffUL) {
         sodium_misuse(); /* LCOV_EXCL_LINE */

@@ -9,8 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+//From Nerla: both the sgx pr and the version have different conditionals around including signal.h. I am including both conditionals.
 #ifndef __wasm__
+#ifdef HAVE_SIGNAL_H
 # include <signal.h>
+#endif
 #endif
 
 #ifdef HAVE_SYS_MMAN_H

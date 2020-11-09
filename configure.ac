@@ -119,6 +119,86 @@ AC_ARG_ENABLE(minimal,
 AM_CONDITIONAL([MINIMAL], [test x$enable_minimal = xyes])
 AC_SUBST(SODIUM_LIBRARY_MINIMAL_DEF)
 
+# If --enable-sgx is set, the library is built to be included in an enclave.
+# The issue is that the flags that we will need to build the test applications
+# are different from the one used by to compile enclaves.
+
+old_CPPFLAGS="$CPPFLAGS"
+
+SGX_CPPFLAGS=""
+
+AC_ARG_ENABLE(sgx,
+[AS_HELP_STRING(--enable-sgx,[Build for Intel SGX])],
+[
+  AS_IF([test "x$enableval" = "xyes"], [
+
+    AS_IF([test "$host_cpu" = "x86_64"], [
+
+    ], [
+        AS_IF([test "$host_cpu" = "i386"], [
+
+        ], [
+           AC_MSG_ERROR([Invalid build host: SGX is only supported on x86 (amd64 and i386) CPUs.])
+        ])
+    ])
+
+    sgx_build="yes"
+    AC_DEFINE([SGX], [1], [SGX build])
+    AC_MSG_NOTICE([Compiling to SGX])
+
+    AS_IF([test "x$enable_pie" = "xno"],
+           [AC_MSG_ERROR([SGX build requires position independent executables])
+    ])
+
+    AS_IF([test "x$SGX_SDK" = "x"], [
+           AC_MSG_ERROR([SGX_SDK not set.])
+    ], [
+           AC_MSG_NOTICE([SGX_SDK: ${SGX_SDK}])
+    ])
+
+    SGX_INC_PATH="-I${SGX_SDK}/include -I${SGX_SDK}/include/tlibc"
+
+    AC_SUBST(SGX_INC_PATH)
+
+    AX_CHECK_COMPILE_FLAG([-nostdinc ${SGX_INC_PATH}], [
+    CPPFLAGS="$CPPFLAGS -nostdinc ${SGX_INC_PATH}"
+    SGX_CPPFLAGS="-nostdinc ${SGX_INC_PATH}"])
+
+    AX_CHECK_COMPILE_FLAG([-ffunction-sections -fdata-sections],
+        AX_CHECK_LINK_FLAG([-ffunction-sections -fdata-sections],
+            [CFLAGS="$CFLAGS -ffunction-sections -fdata-sections"])
+    )
+
+
+  ],[
+    sgx_build="no"
+  ])
+],
+[
+    sgx_build="no"
+])
+
+AC_SUBST(SGX_CPPFLAGS)
+
+AM_CONDITIONAL([SGX], [test "$sgx_build" = "yes"])
+AM_CONDITIONAL([AMD64_BUILD], [test "$host_cpu" = "x86_64"])
+
+AC_ARG_ENABLE(sgx_hw_tests,
+[AS_HELP_STRING(--enable-sgx-hw-tests,
+  [Compile the test programs for SGX in hardware mode when --enable-sgx is set])],
+[
+  AS_IF([test "x$enableval" = "xyes"], [
+    enable_sgx_hw_tests="yes"
+    CFLAGS="$CFLAGS -DNDEBUG -DEDEBUG -UDEBUG"
+  ], [
+    enable_sgx_hw_tests="no"
+  ])
+],
+[
+  enable_sgx_hw_tests="no"
+])
+AM_CONDITIONAL([SGX_HW], [test x$enable_sgx_hw_tests = xyes])
+
 AC_ARG_WITH(pthreads, AC_HELP_STRING([--with-pthreads],
  [use pthreads library, or --without-pthreads to disable threading support.]),
  [ ], [withval="yes"])
@@ -163,7 +243,9 @@ AC_ARG_WITH(ctgrind,
     AC_CHECK_LIB(ctgrind, ct_poison)
   ])
 ])
-
+# undo the changes to CPPFLAGS
+CPPFLAGS="$old_CPPFLAGS"
+# From Nerla: the cpp flags are changed back after the "AC_ARG_WITH(ctgrind," statement
 AC_ARG_ENABLE(retpoline,
 [AS_HELP_STRING(--enable-retpoline,Use return trampolines for indirect calls)],
 [AS_IF([test "x$enableval" = "xyes"], [
@@ -306,6 +388,11 @@ AS_CASE([$host_os],
   [*], [
     AX_CHECK_COMPILE_FLAG([-fstack-protector], [
       AX_CHECK_LINK_FLAG([-fstack-protector],
+      AX_CHECK_COMPILE_FLAG([-fstack-protector-strong],
+        AX_CHECK_LINK_FLAG([-fstack-protector-strong],
+            [CFLAGS="$CFLAGS -fstack-protector-strong"],
+            [CFLAGS="$CFLAGS -fstack-protector"]),
+        ),
         [CFLAGS="$CFLAGS -fstack-protector"]
       )
     ])
@@ -364,8 +451,14 @@ AS_IF([test "x$EMSCRIPTEN" = "x"], [
   AX_CHECK_LINK_FLAG([-Wl,-z,noexecstack], [LDFLAGS="$LDFLAGS -Wl,-z,noexecstack"])
 ])
 
+old_CPPFLAGS="$CPPFLAGS"
+CPPFLAGS="$CPPFLAGS $SGX_CPPFLAGS"
+
 AX_CHECK_CATCHABLE_SEGV
 AX_CHECK_CATCHABLE_ABRT
+
+CPPFLAGS="$old_CPPFLAGS"
+
 
 AS_IF([test "x$with_threads" = "xyes"], [
   AX_TLS([AC_MSG_RESULT(thread local storage is supported)
@@ -384,6 +477,10 @@ dnl Checks for headers
 AS_IF([test "x$EMSCRIPTEN" = "x"], [
 
   oldcflags="$CFLAGS"
+
+  old_CPPFLAGS="$CPPFLAGS"
+  CPPFLAGS="$CPPFLAGS $SGX_CPPFLAGS"
+
   AX_CHECK_COMPILE_FLAG([-mmmx], [CFLAGS="$CFLAGS -mmmx"])
   AC_MSG_CHECKING(for MMX instructions set)
   AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
@@ -557,7 +654,10 @@ __m512i y = _mm512_permutexvar_epi64(_mm512_setr_epi64(0, 1, 4, 5, 2, 3, 6, 7), 
     [AC_MSG_RESULT(no)])
   CFLAGS="$oldcflags"
 
+  CPPFLAGS="$old_CPPFLAGS"
+
 ])
+
 
 AC_SUBST(CFLAGS_MMX)
 AC_SUBST(CFLAGS_SSE2)
@@ -571,7 +671,11 @@ AC_SUBST(CFLAGS_AESNI)
 AC_SUBST(CFLAGS_PCLMUL)
 AC_SUBST(CFLAGS_RDRAND)
 
-AC_CHECK_HEADERS([sys/mman.h sys/random.h intrin.h])
+# From Nerla: from the sgx pr it seems like it only needs to check the other two headers if they are not using sgx
+AC_CHECK_HEADER([intrin.h])
+AS_IF([test "$sgx_build" = "no"],[
+    AC_CHECK_HEADERS([sys/mman.h signal.h])
+])
 
 AC_MSG_CHECKING([if _xgetbv() is available])
 AC_LINK_IFELSE(
@@ -811,9 +915,8 @@ dnl Checks for functions and headers
 
 AC_FUNC_ALLOCA
 AS_IF([test "x$EMSCRIPTEN" = "x"],[
-  AC_CHECK_FUNCS([arc4random arc4random_buf])
-  AC_CHECK_FUNCS([mmap mlock madvise mprotect])
 
+# From Nerla: in the sgx pr some functions are not checked when sgx is enabled. I removed references to the functions they explicitly said was not for sgx and kept the rest. Potentially some of the ones kept should not be checked also.
   AC_MSG_CHECKING(for getrandom with a standard API)
   AC_LINK_IFELSE([AC_LANG_PROGRAM([[
 #include <stdlib.h>
@@ -859,8 +962,9 @@ if (&getentropy != NULL) {
   [AC_MSG_RESULT(no)
   ])
 ])
-AC_CHECK_FUNCS([posix_memalign getpid nanosleep])
-AC_CHECK_FUNCS([memset_s explicit_bzero explicit_memset])
+AC_CHECK_FUNCS([nanosleep])
+AC_CHECK_FUNCS([explicit_memset])
+
 
 AC_SUBST([LIBTOOL_EXTRA_FLAGS])
 

@@ -1,6 +1,10 @@
 
 #define TEST_NAME "box_seal"
+#ifndef SGX
 #include "cmptest.h"
+#else
+#include "test_enclave.h"
+#endif
 
 static
 void tv1(void)

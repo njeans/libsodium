@@ -1,7 +1,9 @@
 
 #include <assert.h>
 #include <errno.h>
-#include <fcntl.h>
+#ifndef SGX
+# include <fcntl.h>
+#endif
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -11,14 +13,7 @@
 # include <unistd.h>
 #endif
 
-#include <sys/types.h>
-#ifndef _WIN32
-# include <sys/stat.h>
-# include <sys/time.h>
-#endif
-#ifdef __linux__
-# define _LINUX_SOURCE
-#endif
+//From Nerla: added to SGX conditional what was in the pr with the updated versions
 #ifdef HAVE_SYS_RANDOM_H
 # include <sys/random.h>
 #endif
@@ -41,9 +36,24 @@
 #if !defined(NO_BLOCKING_RANDOM_POLL) && defined(__linux__)
 # define BLOCK_ON_DEV_RANDOM
 #endif
-#ifdef BLOCK_ON_DEV_RANDOM
-# include <poll.h>
-#endif
+
+#ifdef SGX
+# include "sgx_trts.h"
+#else
+# include <sys/types.h>
+# ifndef _WIN32
+#  include <sys/stat.h>
+#  include <sys/time.h>
+# endif
+# ifdef __linux__
+#   define _LINUX_SOURCE
+# endif
+# ifdef BLOCK_ON_DEV_RANDOM
+#  include <poll.h>
+# endif
+# endif
+#endif /* SGX */
+
 #ifdef HAVE_RDRAND
 # pragma GCC target("rdrnd")
 # include <immintrin.h>
@@ -135,6 +145,7 @@ static TLS InternalRandom stream = {
  * Get a high-resolution timestamp, as a uint64_t value
  */
 
+#ifndef SGX
 #ifdef _WIN32
 static uint64_t
 sodium_hrtime(void)
@@ -159,13 +170,38 @@ sodium_hrtime(void)
     }
     return ((uint64_t) tv.tv_sec) * 1000000U + (uint64_t) tv.tv_usec;
 }
+//From Nerla: kept edif to end the two if conditions
 #endif /* _WIN32 */
+#endif /* SGX */
 
 /*
  * Initialize the entropy source
  */
 
-#ifdef _WIN32
+#ifdef SGX
+
+static void
+randombytes_salsa20_random_init(void)
+{
+
+    /* Use SGX API's to generate the nonce
+     * Note that, even though in simulation mode the sgx_read_rand function
+     * generates a pseudo-random sequence, it is not an issue here.
+     * We use sgx_read_rand instead of the time to generate the nonce because
+     * it is easier: sgx_get_trusted_time requires establishing a session with
+     * the platform service enclave.
+     */
+
+    if (sgx_read_rand((unsigned char*)&stream.nonce, sizeof(stream.nonce)) != SGX_SUCCESS) {
+       sodium_misuse(); /* LCOV_EXCL_LINE */
+    }
+
+
+    assert(stream.nonce != (uint64_t) 0U);
+    global.rdrand_available = sodium_runtime_has_rdrand();
+}
+
+#elif defined(_WIN32)
 
 static void
 randombytes_internal_random_init(void)
@@ -385,7 +421,7 @@ randombytes_internal_random_init(void)
 # endif
 }
 
-#endif /* _WIN32 */
+#endif /* SGX */
 
 /*
  * (Re)seed the generator using the entropy source
@@ -406,7 +442,20 @@ randombytes_internal_random_stir(void)
     global.pid = getpid();
 #endif
 
-#ifndef _WIN32
+#ifdef SGX
+
+    /* Use SGX API's to generate the nonce
+     * WARNING: SGX documentation states that, in simulation mode,
+     * the sgx_read_rand function generates a pseudo-random sequence.
+     */
+
+    #warning Insecure in SGX simulation mode
+
+    if (sgx_read_rand(stream.key, sizeof stream.key) != SGX_SUCCESS) {
+       sodium_misuse(); /* LCOV_EXCL_LINE */
+    }
+
+#elif !defined(_WIN32)
 
 # ifdef HAVE_GETENTROPY
      if (global.getentropy_available != 0) {
@@ -432,7 +481,7 @@ randombytes_internal_random_stir(void)
     sodium_misuse();
 # endif
 
-#else /* _WIN32 */
+#else /* SGX */
     if (! RtlGenRandom((PVOID) stream.key, (ULONG) sizeof stream.key)) {
         sodium_misuse(); /* LCOV_EXCL_LINE */
     }
@@ -465,7 +514,8 @@ randombytes_internal_random_stir_if_needed(void)
  * Close the stream, free global resources
  */
 
-#ifdef _WIN32
+
+#if defined(_WIN32) || defined(SGX)
 static int
 randombytes_internal_random_close(void)
 {
